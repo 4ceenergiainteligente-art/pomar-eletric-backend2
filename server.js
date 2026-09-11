@@ -20,58 +20,76 @@ const axiosAsaas = axios.create({
   headers: { access_token: ASAAS_TOKEN }
 });
 
-const mqttClient = mqtt.connect(MQTT_BROKER, {
-  username: MQTT_USER,
-  password: MQTT_PASS,
-  rejectUnauthorized: false
-});
+// Conexão MQTT com tratamento de reconexão automática
+let mqttClient;
+try {
+  mqttClient = mqtt.connect(MQTT_BROKER, {
+    username: MQTT_USER,
+    password: MQTT_PASS,
+    rejectUnauthorized: false,
+    reconnectPeriod: 3000
+  });
 
-mqttClient.on('connect', () => {
-  console.log('[MQTT] Conectado ao HiveMQ Cloud!');
-  mqttClient.subscribe('pomar/+/status');
-});
+  mqttClient.on('connect', () => {
+    console.log('[MQTT] Conectado ao HiveMQ Cloud com sucesso!');
+    mqttClient.subscribe('pomar/+/status');
+  });
+
+  mqttClient.on('error', (err) => {
+    console.error('[MQTT ERRO]:', err.message);
+  });
+} catch (e) {
+  console.error('[MQTT FALHA NO BOOT]:', e.message);
+}
 
 const boxesStatus = {
   1: { relay: false, kwh: 0, watts: 0, reais: 0 },
   2: { relay: false, kwh: 0, watts: 0, reais: 0 }
 };
 
-mqttClient.on('message', (topic, message) => {
-  try {
-    const data = JSON.parse(message.toString());
-    const boxId = topic.split('/')[1].replace('box', '');
-    boxesStatus[boxId] = data;
-  } catch (err) {}
-});
+if (mqttClient) {
+  mqttClient.on('message', (topic, message) => {
+    try {
+      const data = JSON.parse(message.toString());
+      const boxId = topic.split('/')[1].replace('box', '');
+      boxesStatus[boxId] = data;
+    } catch (err) {}
+  });
+}
 
-let clientePadraoId = null;
-
-async function carregarClienteBalcao() {
+// Identifica ou cria o cliente único do totem no Asaas com CPF válido
+async function obterClienteTotem() {
   try {
-    const busca = await axiosAsaas.get('/customers?name=Consumidor Recarga');
-    if (busca.data.data && busca.data.data.length > 0) {
-      clientePadraoId = busca.data.data[0].id;
-    } else {
-      const novo = await axiosAsaas.post('/customers', {
-        name: 'Consumidor Recarga',
-        cpfCnpj: '11144477735'
-      });
-      clientePadraoId = novo.data.id;
+    const listagem = await axiosAsaas.get('/customers');
+    if (listagem.data.data && listagem.data.data.length > 0) {
+      const clienteExistente = listagem.data.data[0];
+      if (!clienteExistente.cpfCnpj) {
+        await axiosAsaas.post(`/customers/${clienteExistente.id}`, {
+          cpfCnpj: '11144477735'
+        });
+      }
+      return clienteExistente.id;
     }
-    console.log(`[ASAAS] Cliente Ativo: ${clientePadraoId}`);
+
+    const novo = await axiosAsaas.post('/customers', {
+      name: 'Caixa Balcao Totem',
+      cpfCnpj: '11144477735'
+    });
+    return novo.data.id;
   } catch (err) {
-    console.error('[ERRO CLIENTE]:', err.response?.data || err.message);
+    console.error('[ERRO AO IDENTIFICAR CLIENTE]:', err.response?.data || err.message);
+    throw err;
   }
 }
 
-// 1. TELA PRINCIPAL DO TOTEM (Entrega o HTML diretamente via HTTPS)
+// 1. TELA PRINCIPAL (Entregue diretamente pelo Render sem bloqueio de navegador)
 app.get('/', (req, res) => {
   res.send(`<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Recarga EV - Vaga 01</title>
+  <title>Recarga EV - Totem</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
     body { background: #0b0f19; color: #fff; display: flex; justify-content: center; padding: 20px 14px; min-height: 100vh; }
@@ -156,12 +174,12 @@ app.get('/', (req, res) => {
         area.style.display = 'block';
         btn.innerText = "Aguardando Pagamento...";
       } else {
-        alert("Erro Asaas: " + (data.error || JSON.stringify(data)));
+        alert("Erro Asaas: " + (data.error || "Tente novamente"));
         btn.disabled = false;
         btn.innerText = "GERAR PIX";
       }
     } catch (err) {
-      alert("Falha de conexão com o servidor.");
+      alert("Falha de comunicação com o servidor.");
       btn.disabled = false;
       btn.innerText = "GERAR PIX";
     }
@@ -201,13 +219,14 @@ app.get('/api/status/:box', (req, res) => {
   res.json(boxesStatus[req.params.box] || {});
 });
 
+// Emite cobrança PIX anônima
 app.post('/api/criar-pix', async (req, res) => {
   const { boxId, valor } = req.body;
   try {
-    if (!clientePadraoId) await carregarClienteBalcao();
+    const customerId = await obterClienteTotem();
 
     const payment = await axiosAsaas.post('/payments', {
-      customer: clientePadraoId,
+      customer: customerId,
       billingType: 'PIX',
       value: parseFloat(valor),
       dueDate: new Date().toISOString().split('T')[0],
@@ -222,11 +241,15 @@ app.post('/api/criar-pix', async (req, res) => {
       qrCodeBase64: pixDetails.data.encodedImage
     });
   } catch (error) {
-    console.error('[ERRO PIX]:', error.response?.data || error.message);
-    res.status(500).json({ error: error.response?.data?.errors?.[0]?.description || error.message });
+    const detalhe = error.response?.data?.errors?.[0]?.description 
+      || error.response?.data?.message 
+      || error.message;
+    console.error('[ERRO PIX]:', detalhe);
+    res.status(500).json({ error: detalhe });
   }
 });
 
+// Webhook para ligar o relé via MQTT quando o pagamento cair
 app.post('/webhook-asaas', (req, res) => {
   const { event, payment } = req.body;
 
@@ -236,17 +259,18 @@ app.post('/webhook-asaas', (req, res) => {
       const boxId = ref.replace('BOX_', '');
       console.log(`[PAGO] Vaga 0${boxId} -> R$ ${payment.value}`);
 
-      mqttClient.publish(`pomar/box${boxId}/cmd`, JSON.stringify({
-        acao: 'START',
-        reais: payment.value
-      }));
+      if (mqttClient) {
+        mqttClient.publish(`pomar/box${boxId}/cmd`, JSON.stringify({
+          acao: 'START',
+          reais: payment.value
+        }));
+      }
     }
   }
   res.sendStatus(200);
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, async () => {
+app.listen(PORT, () => {
   console.log(`Servidor ativo na porta ${PORT}`);
-  await carregarClienteBalcao();
 });
