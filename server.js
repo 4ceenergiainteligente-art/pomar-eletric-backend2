@@ -12,7 +12,7 @@ const ASAAS_URL = 'https://sandbox.asaas.com/v3';
 const ASAAS_TOKEN = '$aact_hmlg_000MzkwODA2MWY2OGM3MWRlMDU2NWM3MzJlNzZmNGZhZGY6OjczNjU5OWQzLTFkNTMtNDJmZi1hNTI4LTFiNDRjNTQyZDU1Mjo6JGFhY2hfNTcwOTI5MGYtZTY0YS00ZTMzLTgyM2MtMDQwM2Q1ZWIzYjUw';
 
 // --- CONFIGURAÇÃO HIVEMQ CLOUD ---
-const MQTT_BROKER = '4ce38ccb1a3b4f7983ccc33ebd70ca88.s1.eu.hivemq.cloud';
+const MQTT_BROKER = '4ce38ccb1a3b4f7983ccc33ebd70ca88.s1.eu.hivemq.cloud:8883';
 const MQTT_USER = 'pomar_iot';
 const MQTT_PASS = 'Pomar@2026p';
 
