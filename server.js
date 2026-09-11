@@ -12,34 +12,14 @@ const ASAAS_URL = 'https://sandbox.asaas.com/v3';
 const ASAAS_TOKEN = '$aact_hmlg_000MzkwODA2MWY2OGM3MWRlMDU2NWM3MzJlNzZmNGZhZGY6OjczNjU5OWQzLTFkNTMtNDJmZi1hNTI4LTFiNDRjNTQyZDU1Mjo6JGFhY2hfNTcwOTI5MGYtZTY0YS00ZTMzLTgyM2MtMDQwM2Q1ZWIzYjUw';
 
 // --- CONFIGURAÇÃO HIVEMQ CLOUD ---
-const MQTT_BROKER = 'mqtts://SEU_CLUSTER.s1.eu.hivemq.cloud:8883';
+const MQTT_BROKER = '4ce38ccb1a3b4f7983ccc33ebd70ca88.s1.eu.hivemq.cloud';
 const MQTT_USER = 'pomar_iot';
-const MQTT_PASS = 'SUA_SENHA_HIVEMQ';
+const MQTT_PASS = 'Pomar@2026p';
 
 const axiosAsaas = axios.create({
   baseURL: ASAAS_URL,
   headers: { access_token: ASAAS_TOKEN }
 });
-
-let defaultCustomerId = null;
-
-async function initCustomer() {
-  try {
-    const list = await axiosAsaas.get('/customers?name=Consumidor EV');
-    if (list.data.data && list.data.data.length > 0) {
-      defaultCustomerId = list.data.data[0].id;
-    } else {
-      const created = await axiosAsaas.post('/customers', {
-        name: 'Consumidor Recarga EV',
-        cpfCnpj: '00000000000'
-      });
-      defaultCustomerId = created.data.id;
-    }
-    console.log(`[ASAAS] Cliente padrao ativo: ${defaultCustomerId}`);
-  } catch (err) {
-    console.error('[ASAAS ERRO]:', err.response?.data || err.message);
-  }
-}
 
 const mqttClient = mqtt.connect(MQTT_BROKER, {
   username: MQTT_USER,
@@ -48,7 +28,7 @@ const mqttClient = mqtt.connect(MQTT_BROKER, {
 });
 
 mqttClient.on('connect', () => {
-  console.log('[MQTT] Conectado ao HiveMQ Cloud!');
+  console.log('[MQTT] Conectado ao HiveMQ Cloud com sucesso!');
   mqttClient.subscribe('pomar/+/status');
 });
 
@@ -67,23 +47,59 @@ mqttClient.on('message', (topic, message) => {
   } catch (err) {}
 });
 
+// Localiza cliente por CPF, cria um novo ou usa o consumidor geral
+async function obterOuCriarCliente(nome, cpf) {
+  const cpfLimpo = cpf ? cpf.replace(/\D/g, '') : '';
+
+  // 1. Se informou CPF, busca se já existe
+  if (cpfLimpo.length === 11) {
+    try {
+      const busca = await axiosAsaas.get(`/customers?cpfCnpj=${cpfLimpo}`);
+      if (busca.data.data && busca.data.data.length > 0) {
+        return busca.data.data[0].id;
+      }
+      // Não existe: cria novo cliente
+      const novo = await axiosAsaas.post('/customers', {
+        name: nome || 'Motorista EV',
+        cpfCnpj: cpfLimpo
+      });
+      return novo.data.id;
+    } catch (err) {
+      console.error('[ERRO BUSCA/CRIA CLIENTE]:', err.response?.data || err.message);
+    }
+  }
+
+  // 2. Fluxo rápido / sem CPF: busca ou cria o cliente genérico
+  try {
+    const buscaGeral = await axiosAsaas.get('/customers?name=Consumidor EV');
+    if (buscaGeral.data.data && buscaGeral.data.data.length > 0) {
+      return buscaGeral.data.data[0].id;
+    }
+    const novoGeral = await axiosAsaas.post('/customers', {
+      name: 'Consumidor EV'
+    });
+    return novoGeral.data.id;
+  } catch (err) {
+    // Caso padrão de fallback
+    const list = await axiosAsaas.get('/customers');
+    return list.data.data[0].id;
+  }
+}
+
 app.get('/ping', (req, res) => res.send('OK'));
 
 app.get('/api/status/:box', (req, res) => {
-  const boxId = req.params.box;
-  res.json(boxesStatus[boxId] || {});
+  res.json(boxesStatus[req.params.box] || {});
 });
 
 app.post('/api/criar-pix', async (req, res) => {
-  const { boxId, valor } = req.body;
-
-  if (!defaultCustomerId) {
-    return res.status(503).json({ error: 'Cliente Asaas inicializando...' });
-  }
+  const { boxId, valor, nome, cpf } = req.body;
 
   try {
+    const customerId = await obterOuCriarCliente(nome, cpf);
+
     const payment = await axiosAsaas.post('/payments', {
-      customer: defaultCustomerId,
+      customer: customerId,
       billingType: 'PIX',
       value: parseFloat(valor),
       dueDate: new Date().toISOString().split('T')[0],
@@ -99,6 +115,7 @@ app.post('/api/criar-pix', async (req, res) => {
       qrCodeBase64: pixDetails.data.encodedImage
     });
   } catch (error) {
+    console.error('[ERRO PIX]:', error.response?.data || error.message);
     res.status(500).json({ error: error.response?.data || error.message });
   }
 });
@@ -124,7 +141,6 @@ app.post('/webhook-asaas', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, async () => {
+app.listen(PORT, () => {
   console.log(`Servidor ativo na porta ${PORT}`);
-  await initCustomer();
 });
